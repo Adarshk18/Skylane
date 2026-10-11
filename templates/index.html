@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Skylane</title>
+  <meta name="description" content="Skylane builds a trip from one search: flights, stays, a day-by-day itinerary, and a budget.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b6bcb'/%3E%3Cpath d='M6 18h8l3-6 3 6h6' fill='none' stroke='white' stroke-width='1.8' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="appbar">
+    <a class="logo" href="/">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13h7l2.2-5.2L14.5 13H21l-2.2 2.4H5.2L3 13z"/></svg>
+      Skylane
+    </a>
+    <p class="appbar-note">Flights, stays, and a day-by-day plan</p>
+  </header>
+
+  <main class="shell">
+    <form id="trip-form" class="search">
+      <label class="search-field" for="query">
+        <span>Where do you want to go?</span>
+        <textarea
+          id="query"
+          name="query"
+          rows="2"
+          required
+          maxlength="4000"
+          placeholder="Lisbon for 4 days from Delhi next month. Mid-range hotel, food, and one neighborhood a day."
+        ></textarea>
+      </label>
+      <div class="search-side">
+        <button type="submit" class="submit" id="submit">
+          <span id="submit-label">Plan trip</span>
+        </button>
+        <p class="form-error" id="form-error" hidden></p>
+      </div>
+      <div class="samples" aria-label="Example trips">
+        <button type="button" class="sample" data-query="Four days in Lisbon next month, leaving from Delhi. Mid-range hotels, food, and a slow afternoon in each neighborhood.">Delhi to Lisbon · 4 days</button>
+        <button type="button" class="sample" data-query="Five days in Kyoto in November, flying from Mumbai. A small hotel, temples, and one day in Nara.">Mumbai to Kyoto · 5 days</button>
+        <button type="button" class="sample" data-query="Three nights in Istanbul next month, leaving from Dubai. A walkable hotel, food, and the Bosphorus.">Dubai to Istanbul · 3 nights</button>
+      </div>
+    </form>
+
+    <section class="workspace" id="brief" aria-live="polite">
+      <div class="empty" id="brief-empty">
+        <h1 id="brief-title">Plan a trip</h1>
+        <p class="lede">Enter a route, dates, and how you want to travel. Skylane returns flights, places to stay, the days, and a budget.</p>
+        <ul class="modules">
+          <li>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 14h8l2-5 2 5h6l-2 3H5l-2-3z"/></svg>
+            <strong>Flights</strong>
+            <span>Airline, airports, and times</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20H4V10.5zM9 20v-6h6v6"/></svg>
+            <strong>Stays</strong>
+            <span>Hotels that fit the trip</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14H5zM5 9h14M9 5v4"/></svg>
+            <strong>Itinerary</strong>
+            <span>One block per day</span>
+          </li>
+          <li>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 7h12v11H6zM8 7V5h8v2M8 12h8M8 15h5"/></svg>
+            <strong>Budget</strong>
+            <span>Flights, stay, and a total</span>
+          </li>
+        </ul>
+        <button type="button" class="text-btn" id="show-sample">Preview a sample plan</button>
+      </div>
+
+      <div class="loading" id="brief-loading" hidden>
+        <h2>Building your trip</h2>
+        <ol class="steps" id="steps">
+          <li data-step="flights">Flights</li>
+          <li data-step="stays">Stays</li>
+          <li data-step="days">Itinerary</li>
+          <li data-step="brief">Plan</li>
+        </ol>
+        <p class="loading-note" id="loading-note">Checking flights.</p>
+      </div>
+
+      <article class="result" id="brief-result" hidden>
+        <header class="result-head">
+          <div>
+            <p class="eyebrow" id="result-kicker">Trip</p>
+            <h2 id="result-title">Your plan</h2>
+            <p class="result-query" id="result-query"></p>
+          </div>
+          <button type="button" class="text-btn" id="new-trip">New search</button>
+        </header>
+        <div class="plan-tabs" id="plan-tabs" role="tablist" aria-label="Trip sections" hidden>
+          <button type="button" class="plan-tab is-on" role="tab" data-tab="all" aria-selected="true">All</button>
+          <button type="button" class="plan-tab" role="tab" data-tab="flights" aria-selected="false">Flights</button>
+          <button type="button" class="plan-tab" role="tab" data-tab="stays" aria-selected="false">Stays</button>
+          <button type="button" class="plan-tab" role="tab" data-tab="itinerary" aria-selected="false">Itinerary</button>
+          <button type="button" class="plan-tab" role="tab" data-tab="budget" aria-selected="false">Budget</button>
+          <button type="button" class="plan-tab" role="tab" data-tab="tips" aria-selected="false">Tips</button>
+        </div>
+        <div class="result-body" id="result-body"></div>
+        <p class="result-meta" id="result-meta"></p>
+      </article>
+    </section>
+  </main>
+  <noscript>
+    <p class="noscript">Skylane needs JavaScript to search for a trip.</p>
+  </noscript>
+  <script src="/static/script.js" defer></script>
+</body>
+</html>

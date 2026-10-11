@@ -496,6 +496,75 @@ def get_time_range(
 # SEARCH FLIGHTS
 # ============================================================
 
+class FlightAPIError(RuntimeError):
+    def __init__(self, status_code: int, code: str, info: str):
+        self.status_code = status_code
+        self.code = code
+        super().__init__(info or code or f"HTTP {status_code}")
+
+
+def _aviationstack_error(response: requests.Response) -> FlightAPIError:
+    code = ""
+    info = ""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        error = body["error"]
+        code = str(error.get("code") or error.get("type") or "")
+        info = str(error.get("info") or error.get("message") or "")
+    info = re.sub(r"access_key=[^&\s]+", "access_key=***", info)
+    return FlightAPIError(response.status_code, code, info)
+
+
+def _get_flights(params: dict) -> list:
+    try:
+        response = requests.get(BASE_URL, params=params, timeout=15)
+    except requests.RequestException as exc:
+        raise FlightAPIError(0, "request_failed", "The flight API could not be reached.") from exc
+
+    if response.status_code >= 400:
+        raise _aviationstack_error(response)
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise FlightAPIError(response.status_code, "bad_response", "The flight API returned an unreadable response.") from exc
+
+    if isinstance(data, dict) and isinstance(data.get("error"), dict):
+        error = data["error"]
+        raise FlightAPIError(
+            response.status_code,
+            str(error.get("code") or ""),
+            str(error.get("info") or error.get("message") or "Aviationstack rejected the search."),
+        )
+
+    if not isinstance(data, dict):
+        return []
+    flights = data.get("data", [])
+    return flights if isinstance(flights, list) else []
+
+
+def _flight_failure_message(exc: FlightAPIError, departure_date: Optional[str]) -> str:
+    if exc.status_code == 429 or exc.code == "rate_limit_reached":
+        return "Aviationstack's monthly request limit is used up. This trip continues without flight times."
+    if exc.status_code in (401, 403) and "key" in exc.code:
+        return "Aviationstack rejected the API key. This trip continues without flight times."
+    if departure_date and exc.status_code == 403:
+        return (
+            f"Aviationstack cannot look up flights on {departure_date} with this plan. "
+            "The free plan only returns live flights, not a future or past date. "
+            "This trip continues without scheduled times for that day."
+        )
+    if exc.status_code == 403:
+        return (
+            "Aviationstack refused the flight search (403). "
+            "Check the API key and the free-plan limit. This trip continues without flight times."
+        )
+    return "The flight search failed. This trip continues without flight times."
+
+
 def search_flights(
     origin: str,
     destination: str,
@@ -503,13 +572,10 @@ def search_flights(
     airline: Optional[str] = None,
     flight_status: Optional[str] = None,
     limit: int = 20,
-):
+) -> tuple[list, str]:
 
     if not API_KEY:
-
-        raise ValueError(
-            "AVIATIONSTACK_API_KEY is missing."
-        )
+        raise ValueError("AVIATIONSTACK_API_KEY is missing.")
 
     params = {
         "access_key": API_KEY,
@@ -517,48 +583,33 @@ def search_flights(
         "arr_iata": destination,
         "limit": limit,
     }
-
-    # Optional filters
-    if departure_date:
-        params["flight_date"] = departure_date
-
     if airline:
         params["airline_name"] = airline
-
     if flight_status:
         params["flight_status"] = flight_status
 
+    note = ""
+    dated = dict(params)
+    if departure_date:
+        dated["flight_date"] = departure_date
+
     try:
+        return _get_flights(dated), note
+    except FlightAPIError as exc:
+        if not departure_date or exc.status_code != 403:
+            raise RuntimeError(_flight_failure_message(exc, departure_date)) from exc
 
-        response = requests.get(
-            BASE_URL,
-            params=params,
-            timeout=15,
-        )
+    try:
+        flights = _get_flights(params)
+    except FlightAPIError as exc:
+        raise RuntimeError(_flight_failure_message(exc, departure_date)) from exc
 
-        response.raise_for_status()
-
-        data = response.json()
-
-    except requests.RequestException as e:
-
-        raise RuntimeError(
-            f"Flight API request failed: {e}"
-        )
-
-    # Aviationstack API errors
-    if "error" in data:
-
-        error = data["error"]
-
-        raise RuntimeError(
-            error.get(
-                "info",
-                "Unknown Aviationstack API error"
-            )
-        )
-
-    return data.get("data", [])
+    note = (
+        f"Flights below are live results for {origin} to {destination}, "
+        f"not the requested date {departure_date}. "
+        "This Aviationstack plan does not allow a date filter."
+    )
+    return flights, note
 
 
 # ============================================================
@@ -661,7 +712,7 @@ def find_flights(
         )
 
     # Search API
-    flights = search_flights(
+    flights, _note = search_flights(
         origin=origin_iata,
         destination=destination_iata,
         departure_date=departure_date,

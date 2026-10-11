@@ -1,5 +1,5 @@
 import operator
-from tools.flight_tool import resolve_location, search_flights
+from tools.flight_tool import format_flight, resolve_location, search_flights
 from tools.tavily_tool import tavily_search
 from langchain_groq import ChatGroq
 from langchain_core.messages import (
@@ -139,27 +139,79 @@ Rules:
             "llm_calls": state.get("llm_calls", 0) + 1
         }
 
-    # Step 4: Call the flight search function with correct arguments
-    flight_data = search_flights(
-        origin=origin_iata,
-        destination=destination_iata,
-        departure_date=params.departure_date,
-        limit=20
-    )
+    # Step 4: Call the flight search. A refused lookup must not stop the trip.
+    note = ""
+    try:
+        flight_data, note = search_flights(
+            origin=origin_iata,
+            destination=destination_iata,
+            departure_date=params.departure_date,
+            limit=20
+        )
+    except (RuntimeError, ValueError) as exc:
+        flight_data = []
+        note = str(exc)
+
+    if note and flight_data:
+        flight_results = note + "\n" + flights_for_prompt(flight_data)
+    elif note:
+        flight_results = note
+    else:
+        flight_results = flight_data
+
+    if flight_data and not note:
+        message = f"Flight search completed for {origin_iata} to {destination_iata}."
+    else:
+        message = note or f"No flights found for {origin_iata} to {destination_iata}."
 
     # Step 5: Return results to the LangGraph state
     return {
-        "flight_results": flight_data,
+        "flight_results": flight_results,
         "messages": [
-            AIMessage(
-                content=(
-                    f"Flight search completed for "
-                    f"{origin_iata} to {destination_iata}."
-                )
-            )
+            AIMessage(content=message)
         ],
         "llm_calls": state.get("llm_calls", 0) + 1
     }
+
+
+def flights_for_prompt(flights) -> str:
+    if not flights:
+        return "No flights found."
+    if isinstance(flights, str):
+        text = flights.strip()
+        return text or "No flights found."
+    if not isinstance(flights, list):
+        return str(flights)
+
+    lines = []
+    for raw in flights[:6]:
+        if not isinstance(raw, dict):
+            lines.append(f"- {raw}")
+            continue
+
+        flight = raw
+        if isinstance(raw.get("departure"), dict) or isinstance(raw.get("airline"), dict):
+            try:
+                flight = format_flight(raw)
+            except (AttributeError, TypeError):
+                flight = raw
+
+        airline = flight.get("airline") or "Unknown airline"
+        number = flight.get("flight_number") or ""
+        date = flight.get("flight_date") or ""
+        origin = " ".join(
+            part for part in (flight.get("origin"), flight.get("origin_airport")) if part
+        )
+        destination = " ".join(
+            part for part in (flight.get("destination"), flight.get("destination_airport")) if part
+        )
+        lines.append(
+            f"- {airline} {number} {date}: "
+            f"{origin or 'origin unknown'} departs {flight.get('departure_time') or 'unscheduled'}; "
+            f"{destination or 'destination unknown'} arrives {flight.get('arrival_time') or 'unscheduled'}"
+        )
+
+    return "\n".join(lines) if lines else "No flights found."
 
 
 def hotel_agent(state: TravelState):
@@ -182,7 +234,7 @@ def itinerary_agent(state: TravelState):
     {state['user_query']}
 
     Flight Details:
-    {state['flight_results']}
+    {flights_for_prompt(state['flight_results'])}
 
     Hotel Details:
     {state['hotel_results']}
@@ -210,23 +262,31 @@ def final_agent(state: TravelState):
     {state['user_query']}
 
 Flights:
-{state['flight_results']}
+{flights_for_prompt(state['flight_results'])}
 
 Hotels:
 {state['hotel_results']}
 
 Itinerary:
 {state['itinerary']}
-    
-Format the final answer beautifully using these sections:
-1.Trip Summary
-2. Flight Information
-3. Hotel Suggestions
-4. Day-by-Day Itinerary
-5. Estimated Budget
-6. Final Recommendations
 
-Important: Ensure the response is clear, concise, and user-friendly. Avoid unnecessary repetition and maintain a professional tone.
+Write the answer in Markdown with these headings, in this order.
+Each heading is on its own line, written exactly like this:
+
+## Trip Summary
+## Flight Information
+## Hotel Suggestions
+## Day-by-Day Itinerary
+## Estimated Budget
+## Final Recommendations
+
+Rules:
+- Leave a blank line between sections.
+- In Flight Information, give each flight its own block. Use one line each for Airline, From, To, Departs, and Arrives.
+- In Hotel Suggestions, use one bullet per hotel with the name, the area, and why it fits.
+- In Day-by-Day Itinerary, start each day with **Day 1: title**.
+- In Estimated Budget, use one line per cost and end with a total line.
+- Say each fact once. Do not paste raw search data, and do not add any other heading.
     
 """
     response = llm.invoke([
