@@ -122,6 +122,67 @@ groq_extractor = (
 )
 
 
+# 5-minute prompt cache. The breakpoint sits on the stable system text.
+# Claude caches a prefix only at 512 tokens or more, and a shorter prefix
+# is billed as a normal request.
+PROMPT_CACHE = {"type": "ephemeral"}
+
+PLANNER_INSTRUCTIONS = """You are an expert travel planner for Skylane.
+
+Write practical, budget-aware plans that a traveler can follow. Use only the trip facts in the user message. Do not invent flights, hotels, prices, or times that are not in those facts. When a fact is missing, say so in a few words and continue. Use the same place names, dates, airlines, and hotel names that appear in the user message.
+
+When the user message asks for the itinerary, return only the day-by-day plan. Start each day with **Day 1: title**. Keep each day practical, in time order, and easy to follow. Do not add the other sections.
+
+When the user message asks for the final travel brief, write Markdown with these headings, in this order. Each heading is on its own line, written exactly like this:
+
+## Trip Summary
+## Flight Information
+## Hotel Suggestions
+## Day-by-Day Itinerary
+## Estimated Budget
+## Final Recommendations
+
+Rules for the final brief:
+- Leave a blank line between sections.
+- In Trip Summary, state where the traveler is going, the dates if known, and the kind of trip in a few sentences.
+- In Flight Information, give each flight its own block. Use one line each for Airline, From, To, Departs, and Arrives.
+- In Hotel Suggestions, use one bullet per hotel with the name, the area, and why it fits.
+- In Day-by-Day Itinerary, start each day with **Day 1: title**.
+- In Estimated Budget, use one line per cost and end with a total line. Keep the costs consistent with the flights, hotels, and days above.
+- In Final Recommendations, give a short list of what to book, what to skip, and what to confirm before departure.
+- Say each fact once. Do not paste raw search data, and do not add any other heading.
+"""
+
+
+def cached_system(text: str) -> SystemMessage:
+    return SystemMessage(
+        content=[
+            {
+                "type": "text",
+                "text": text,
+                "cache_control": PROMPT_CACHE,
+            }
+        ]
+    )
+
+
+def plain_messages(messages):
+    """Drop Anthropic cache markers so the Groq fallback can read the same prompt."""
+    converted = []
+    for message in messages:
+        content = message.content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text") or ""))
+            content = "\n".join(part for part in parts if part)
+        converted.append(message.__class__(content=content))
+    return converted
+
+
 def _fallback_notice(step: str, exc: Exception) -> None:
     print(
         f"Anthropic {step} failed ({exc.__class__.__name__}). "
@@ -137,7 +198,7 @@ def extract_flight_params(messages):
             if groq_extractor is None:
                 raise
             _fallback_notice("flight extraction", exc)
-    return groq_extractor.invoke(messages)
+    return groq_extractor.invoke(plain_messages(messages))
 
 
 def invoke_llm(primary, messages, step: str):
@@ -148,7 +209,7 @@ def invoke_llm(primary, messages, step: str):
             if groq_llm is None:
                 raise
             _fallback_notice(step, exc)
-    return groq_llm.invoke(messages)
+    return groq_llm.invoke(plain_messages(messages))
 
 
 def message_text(message) -> str:
@@ -190,7 +251,7 @@ def flight_agent(state: TravelState):
     today = datetime.now().astimezone().date().isoformat()
 
     params = extract_flight_params([
-        SystemMessage(content=f"""
+        cached_system(f"""
 You are a flight search requirement extractor.
 
 Today's date is {today}.
@@ -327,25 +388,24 @@ def hotel_agent(state: TravelState):
 
 
 def itinerary_agent(state: TravelState):
-    prompt = f""""Create a complete travel itinerary.
+    prompt = f"""Write the itinerary.
 
-    User Query: 
-    {state['user_query']}
+User Query:
+{state['user_query']}
 
-    Flight Details:
-    {flights_for_prompt(state['flight_results'])}
+Flight Details:
+{flights_for_prompt(state['flight_results'])}
 
-    Hotel Details:
-    {state['hotel_results']}
-
-    Make the itinerary practical, budget-aware, and easy to follow.
-    """
+Hotel Details:
+{state['hotel_results']}
+"""
 
     response = invoke_llm(
         itinerary_llm,
-        [SystemMessage(content="You are an expert travel planner."),
-         HumanMessage(content=prompt)
-         ],
+        [
+            cached_system(PLANNER_INSTRUCTIONS),
+            HumanMessage(content=prompt),
+        ],
         "itinerary",
     )
 
@@ -357,11 +417,10 @@ def itinerary_agent(state: TravelState):
 
 
 def final_agent(state: TravelState):
-    final_prompt = f"""
-    Generate the final travel response  for the user.
+    final_prompt = f"""Write the final travel brief.
 
-    User Request:
-    {state['user_query']}
+User Request:
+{state['user_query']}
 
 Flights:
 {flights_for_prompt(state['flight_results'])}
@@ -371,30 +430,11 @@ Hotels:
 
 Itinerary:
 {state['itinerary']}
-
-Write the answer in Markdown with these headings, in this order.
-Each heading is on its own line, written exactly like this:
-
-## Trip Summary
-## Flight Information
-## Hotel Suggestions
-## Day-by-Day Itinerary
-## Estimated Budget
-## Final Recommendations
-
-Rules:
-- Leave a blank line between sections.
-- In Flight Information, give each flight its own block. Use one line each for Airline, From, To, Departs, and Arrives.
-- In Hotel Suggestions, use one bullet per hotel with the name, the area, and why it fits.
-- In Day-by-Day Itinerary, start each day with **Day 1: title**.
-- In Estimated Budget, use one line per cost and end with a total line.
-- Say each fact once. Do not paste raw search data, and do not add any other heading.
-    
 """
     response = invoke_llm(
         final_llm,
         [
-            SystemMessage(content="You are an expert travel planner."),
+            cached_system(PLANNER_INSTRUCTIONS),
             HumanMessage(content=final_prompt),
         ],
         "final brief",
