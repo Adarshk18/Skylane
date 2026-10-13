@@ -1,6 +1,7 @@
 import operator
 from tools.flight_tool import format_flight, resolve_location, search_flights
 from tools.tavily_tool import tavily_search
+from langchain_anthropic import ChatAnthropic
 from langchain_groq import ChatGroq
 from langchain_core.messages import (
     AnyMessage,
@@ -53,20 +54,120 @@ def get_database_url():
     return database_url
 
 
+load_dotenv()
+
+# Claude API model IDs. Sampling parameters are omitted: these models
+# reject non-default temperature, top_p, and top_k. Thinking stays
+# adaptive, and effort controls how much each model thinks.
+HAIKU_MODEL = "claude-haiku-5-5"
+SONNET_MODEL = "claude-sonnet-5-5"
+OPUS_MODEL = "claude-opus-5-5"
+GROQ_FALLBACK_MODEL = "openai/gpt-oss-120b"
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
+
+if not ANTHROPIC_API_KEY and not GROQ_API_KEY:
     raise ValueError(
-        "GROQ_API_KEY is missing. Please add your groq api key to .env")
+        "ANTHROPIC_API_KEY or GROQ_API_KEY is required. "
+        "Add ANTHROPIC_API_KEY for Claude. GROQ_API_KEY keeps the Groq fallback."
+    )
 
 
-# ===========================
-# LLM
-# ===========================
+def _claude(model: str, max_tokens: int, effort: str) -> ChatAnthropic:
+    return ChatAnthropic(
+        api_key=ANTHROPIC_API_KEY,
+        model=model,
+        max_tokens=max_tokens,
+        output_config={"effort": effort},
+    )
 
-llm = ChatGroq(
-    api_key=GROQ_API_KEY,
-    model="openai/gpt-oss-120b",
+
+# Haiku extracts the flight fields. Opus plans the trip. Sonnet writes
+# the brief the user reads. Groq is the same model as before, and it
+# runs when Claude is unset or a Claude call fails.
+flight_llm = (
+    _claude(HAIKU_MODEL, max_tokens=4096, effort="low")
+    if ANTHROPIC_API_KEY
+    else None
 )
+itinerary_llm = (
+    _claude(OPUS_MODEL, max_tokens=16000, effort="medium")
+    if ANTHROPIC_API_KEY
+    else None
+)
+final_llm = (
+    _claude(SONNET_MODEL, max_tokens=16000, effort="high")
+    if ANTHROPIC_API_KEY
+    else None
+)
+groq_llm = (
+    ChatGroq(api_key=GROQ_API_KEY, model=GROQ_FALLBACK_MODEL)
+    if GROQ_API_KEY
+    else None
+)
+
+if flight_llm is None:
+    print("ANTHROPIC_API_KEY is not set. Using Groq until it is added.")
+
+flight_extractor = (
+    flight_llm.with_structured_output(FlightSearchParams, method="json_schema")
+    if flight_llm is not None
+    else None
+)
+groq_extractor = (
+    groq_llm.with_structured_output(FlightSearchParams)
+    if groq_llm is not None
+    else None
+)
+
+
+def _fallback_notice(step: str, exc: Exception) -> None:
+    print(
+        f"Anthropic {step} failed ({exc.__class__.__name__}). "
+        "Falling back to Groq."
+    )
+
+
+def extract_flight_params(messages):
+    if flight_extractor is not None:
+        try:
+            return flight_extractor.invoke(messages)
+        except Exception as exc:
+            if groq_extractor is None:
+                raise
+            _fallback_notice("flight extraction", exc)
+    return groq_extractor.invoke(messages)
+
+
+def invoke_llm(primary, messages, step: str):
+    if primary is not None:
+        try:
+            return primary.invoke(messages)
+        except Exception as exc:
+            if groq_llm is None:
+                raise
+            _fallback_notice(step, exc)
+    return groq_llm.invoke(messages)
+
+
+def message_text(message) -> str:
+    text = getattr(message, "text", None)
+    if text is not None and str(text).strip():
+        return str(text).strip()
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content.strip()
+    parts = []
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text") or ""))
+    rendered = "\n".join(part for part in parts if part.strip())
+    return rendered.strip() or str(content).strip()
+
 
 # ===========================
 # State
@@ -86,11 +187,9 @@ def flight_agent(state: TravelState):
     query = state["user_query"]
 
     # Step 1: Extract structured flight requirements
-    extractor = llm.with_structured_output(FlightSearchParams)
-
     today = datetime.now().astimezone().date().isoformat()
 
-    params = extractor.invoke([
+    params = extract_flight_params([
         SystemMessage(content=f"""
 You are a flight search requirement extractor.
 
@@ -242,13 +341,16 @@ def itinerary_agent(state: TravelState):
     Make the itinerary practical, budget-aware, and easy to follow.
     """
 
-    response = llm.invoke(
+    response = invoke_llm(
+        itinerary_llm,
         [SystemMessage(content="You are an expert travel planner."),
          HumanMessage(content=prompt)
-         ])
+         ],
+        "itinerary",
+    )
 
     return {
-        "itinerary": response.content,
+        "itinerary": message_text(response),
         "messages": [response],
         "llm_calls": state.get("llm_calls", 0) + 1
     }
@@ -289,10 +391,14 @@ Rules:
 - Say each fact once. Do not paste raw search data, and do not add any other heading.
     
 """
-    response = llm.invoke([
-        SystemMessage(content="You are an expert travel planner."),
-        HumanMessage(content=final_prompt)
-    ])
+    response = invoke_llm(
+        final_llm,
+        [
+            SystemMessage(content="You are an expert travel planner."),
+            HumanMessage(content=final_prompt),
+        ],
+        "final brief",
+    )
 
     return {
         "messages": [response],
@@ -358,7 +464,7 @@ def run_travel_agent(user_input: str, thread_id: str | None = None):
         config=config
     )
 
-    final_answer = result['messages'][-1].content
+    final_answer = message_text(result["messages"][-1])
 
     return {
         "thread_id": thread_id,
