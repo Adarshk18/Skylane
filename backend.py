@@ -1,8 +1,10 @@
 import operator
 from tools.flight_tool import format_flight, resolve_location, search_flights
-from tools.tavily_tool import tavily_search
+# from tools.tavily_tool import tavily_search
+from mcp_client import tavily_mcp_search, aviation_mcp_call
 from langchain_anthropic import ChatAnthropic
 from langchain_groq import ChatGroq
+import asyncio
 from langchain_core.messages import (
     AnyMessage,
     HumanMessage,
@@ -376,7 +378,8 @@ def flights_for_prompt(flights) -> str:
 
 def hotel_agent(state: TravelState):
     query = f"Best hotels for {state['user_query']}"
-    hotel_results = tavily_search(query)
+    # hotel_results = tavily_search(query)
+    hotel_results = asyncio.run(tavily_mcp_search(query))
 
     return {
         "hotel_results": hotel_results,
