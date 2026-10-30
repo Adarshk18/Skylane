@@ -7,12 +7,13 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
-import nest_asyncio
-
 
 from backend import run_travel_agent
 
-nest_asyncio.apply()
+# NOTE: nest_asyncio was removed on purpose.
+# It patched asyncio so anyio (used by Starlette/FastAPI) could no longer
+# detect the running event loop, which made /static/* and every plain `def`
+# endpoint fail with NoEventLoopError.
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -24,12 +25,12 @@ app = FastAPI(
 
 app.mount(
     "/static",
-    StaticFiles(directory=str(BASE_DIR/"static")),
+    StaticFiles(directory=str(BASE_DIR / "static")),
     name="static"
 )
 
 template = Jinja2Templates(
-    directory=str(BASE_DIR/"templates")
+    directory=str(BASE_DIR / "templates")
 )
 
 
@@ -47,6 +48,9 @@ async def home(request: Request):
     )
 
 
+# Keep this as a plain `def` (not `async def`).
+# FastAPI runs it in a worker thread, so the blocking LangGraph call
+# doesn't freeze the server, and asyncio.run() inside the graph works.
 @app.post("/api/travel")
 def travel_planner(request_data: TravelRequest):
     try:
@@ -90,9 +94,9 @@ def travel_planner(request_data: TravelRequest):
 
 
 @app.get("/health")
-async def healrth_check():
+async def health_check():
     return {
-        "succcess": "ok",
+        "success": "ok",
         "message": "Server is running."
     }
 

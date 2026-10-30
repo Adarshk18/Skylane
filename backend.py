@@ -1,10 +1,17 @@
 import operator
-from tools.flight_tool import format_flight, resolve_location, search_flights
-# from tools.tavily_tool import tavily_search
-from mcp_client import tavily_mcp_search, aviation_mcp_call
+import asyncio
+import os
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from typing import TypedDict, Annotated, Optional
+
+import certifi
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+
 from langchain_anthropic import ChatAnthropic
 from langchain_groq import ChatGroq
-import asyncio
 from langchain_core.messages import (
     AnyMessage,
     HumanMessage,
@@ -14,21 +21,14 @@ from langchain_core.messages import (
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import StateGraph, START, END
 from psycopg.rows import dict_row
-import psycopg
-import uuid
-from typing import TypedDict, Annotated
-from dotenv import load_dotenv
-import os
-import certifi
+from psycopg_pool import ConnectionPool
+
+from tools.flight_tool import format_flight, resolve_location, search_flights
+# from tools.tavily_tool import tavily_search
+from mcp_client import tavily_mcp_search
 
 os.environ["SSL_CERT_FILE"] = certifi.where()
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
-
-from datetime import datetime
-from typing import Optional
-
-from pydantic import BaseModel, Field
-from langchain_core.messages import SystemMessage, HumanMessage
 
 
 class FlightSearchParams(BaseModel):
@@ -48,7 +48,7 @@ def get_database_url():
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         raise ValueError(
-            "DATABASE_URL is missing. Please ad your remote database url in postgres render to .env")
+            "DATABASE_URL is missing. Please add your remote database url in postgres render to .env")
 
     if "sslmode" not in database_url:
         separator = "&" if "?" in database_url else "?"
@@ -232,6 +232,23 @@ def message_text(message) -> str:
     return rendered.strip() or str(content).strip()
 
 
+def run_async(coro):
+    """Run a coroutine from sync code without nest_asyncio.
+
+    If no event loop is running in this thread (the normal case here,
+    because FastAPI runs the sync endpoint in a worker thread), use
+    asyncio.run directly. If a loop IS running, run the coroutine in
+    a separate thread with its own fresh loop instead of patching asyncio.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 # ===========================
 # State
 # ===========================
@@ -379,14 +396,14 @@ def flights_for_prompt(flights) -> str:
 def hotel_agent(state: TravelState):
     query = f"Best hotels for {state['user_query']}"
     # hotel_results = tavily_search(query)
-    hotel_results = asyncio.run(tavily_mcp_search(query))
+    hotel_results = run_async(tavily_mcp_search(query))
 
     return {
         "hotel_results": hotel_results,
         "messages": [
             AIMessage(content="Hotel details fetched.")
         ],
-        "llm_calls": state.get("llm_calls", 0)+1
+        "llm_calls": state.get("llm_calls", 0) + 1
     }
 
 
@@ -445,7 +462,7 @@ Itinerary:
 
     return {
         "messages": [response],
-        "llm_calls": state.get("llm_calls", 0)+1
+        "llm_calls": state.get("llm_calls", 0) + 1
     }
 
 
@@ -469,13 +486,18 @@ graph.add_edge("final_agent", END)
 
 DATABASE_URL = get_database_url()
 
-_conn = psycopg.connect(
+# A pool instead of one long-lived connection: Render closes idle
+# connections, and the pool checks and replaces dead ones automatically.
+_pool = ConnectionPool(
     DATABASE_URL,
-    autocommit=True,
-    row_factory=dict_row
+    min_size=1,
+    max_size=5,
+    kwargs={"autocommit": True, "row_factory": dict_row},
+    check=ConnectionPool.check_connection,
+    open=True,
 )
 
-checkpointer = PostgresSaver(_conn)
+checkpointer = PostgresSaver(_pool)
 checkpointer.setup()
 
 travel_graph = graph.compile(checkpointer=checkpointer)
@@ -515,7 +537,7 @@ def run_travel_agent(user_input: str, thread_id: str | None = None):
         "flight_results": result.get("flight_results", ""),
         "hotel_results": result.get("hotel_results", ""),
         "itinerary": result.get("itinerary", ""),
-        "llm_calls": result.get("llm_calls",0),
+        "llm_calls": result.get("llm_calls", 0),
     }
 
 
