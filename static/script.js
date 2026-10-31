@@ -137,8 +137,8 @@ async function onSubmit(event) {
 }
 
 async function requestPlan(query, currentThreadId) {
-  const payload = { query };
-  if (currentThreadId) {
+const payload = { message: query };  
+if (currentThreadId) {
     payload.thread_id = currentThreadId;
   }
 
